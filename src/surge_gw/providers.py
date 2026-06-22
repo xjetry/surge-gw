@@ -52,7 +52,11 @@ def _domain_entry_to_rule_line(entry: str) -> str | None:
     '+.x' / '.x' 后缀 → DOMAIN-SUFFIX;精确域名 → DOMAIN。"""
     if _has_wildcard(entry):
         pattern = entry[2:] if entry.startswith("+.") else entry.lstrip(".")
-        return f"DOMAIN-WILDCARD,{pattern}" if _WILDCARD_DOMAIN.match(pattern) else None
+        # 至少含一个字面标签字符:否则裸 '*' / '?' 会生成匹配所有域名的 catch-all,
+        # 把该 provider 的 policy 误施于全部流量(单条脏数据即可触发)。
+        if _WILDCARD_DOMAIN.match(pattern) and re.search(r"[A-Za-z0-9_-]", pattern):
+            return f"DOMAIN-WILDCARD,{pattern}"
+        return None
     if entry.startswith("+."):
         body = entry[2:]
         return f"DOMAIN-SUFFIX,{body}" if _BARE_DOMAIN.match(body) else None

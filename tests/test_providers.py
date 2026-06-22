@@ -65,6 +65,16 @@ def test_domain_provider_rule_set_skips_invalid_lines():
     assert all(s.kind == "ruleset" for s in art.skipped)
 
 
+def test_domain_provider_rule_set_skips_bare_wildcard():
+    # 裸通配符(脏数据)会变成匹配所有域名的 catch-all,把 provider policy 误施于全部流量;
+    # 必须计入 skipped 而非写出 DOMAIN-WILDCARD,* 这种过宽行。
+    art = convert_domain_provider(["*.ok.com", ".*", "*", "+.*", "*.*"])
+    assert art.kind == "RULE-SET"
+    assert art.lines == ["DOMAIN-WILDCARD,*.ok.com"]
+    assert {s.detail for s in art.skipped} == {".*", "*", "+.*", "*.*"}
+    assert all(s.kind == "ruleset" for s in art.skipped)
+
+
 def test_domain_provider_domain_set_skips_invalid_lines():
     # 无通配符 → DOMAIN-SET 模式;DOMAIN-SET 同样严格校验,含逗号/空格的条目无法成行,
     # 计入 skipped 而非写入非法行(否则单行非法会让整份 DOMAIN-SET 失效)。
