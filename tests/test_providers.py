@@ -65,6 +65,24 @@ def test_domain_provider_rule_set_skips_invalid_lines():
     assert all(s.kind == "ruleset" for s in art.skipped)
 
 
+def test_domain_provider_domain_set_skips_invalid_lines():
+    # 无通配符 → DOMAIN-SET 模式;DOMAIN-SET 同样严格校验,含逗号/空格的条目无法成行,
+    # 计入 skipped 而非写入非法行(否则单行非法会让整份 DOMAIN-SET 失效)。
+    art = convert_domain_provider(["ok.com", "bad,comma.com", "has space.com", "+.suf.org"])
+    assert art.kind == "DOMAIN-SET"
+    assert art.lines == ["ok.com", ".suf.org"]
+    assert {s.detail for s in art.skipped} == {"bad,comma.com", "has space.com"}
+    assert all(s.kind == "ruleset" for s in art.skipped)
+
+
+def test_domain_provider_rule_set_maps_plus_wildcard_prefix():
+    # '+.' 前缀 + 通配符体(罕见):剥离 '+.' 后以 DOMAIN-WILDCARD 表达
+    art = convert_domain_provider(["+.*.example.com", "ok.com"])
+    assert art.kind == "RULE-SET"
+    assert art.lines == ["DOMAIN-WILDCARD,*.example.com", "DOMAIN,ok.com"]
+    assert art.skipped == []
+
+
 def test_ipcidr_provider_to_rule_set():
     art = convert_ipcidr_provider(["1.2.3.0/24", "2001:db8::/32"])
     assert art.kind == "RULE-SET"
