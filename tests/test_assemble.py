@@ -125,3 +125,18 @@ def test_assemble_skips_provider_on_unknown_behavior():
     assert "unknown behavior" in skipped_items[0].reason
     assert "wat" in skipped_items[0].reason
     assert "cnlist" not in b.rulesets
+
+
+def test_assemble_keeps_rule_set_for_wildcard_domain_provider():
+    # 含通配符的 domain provider → 整表 RULE-SET(DOMAIN-WILDCARD 行);
+    # 反填由 art.kind 驱动,故引用行保持 RULE-SET,不被改写为 DOMAIN-SET。
+    up = {**UP, "rules": ["RULE-SET,cnlist,Proxy", "MATCH,Proxy"],
+          "rule-providers": {"cnlist": {"behavior": "domain", "format": "text", "url": "http://h/cn.txt"}}}
+    def fetch_rs(url):
+        return "+.cn\nobjectstorage.*.oraclecloud.com\n"
+    b = build_config_and_rulesets(
+        upstream=up, node_port_map={"A": 1200}, provider_members={}, urls=URLS,
+        host="127.0.0.1", fetch_ruleset_content=fetch_rs, geosite_dat=None, update_interval=3600)
+    assert "RULE-SET,http://127.0.0.1:8080/ruleset/cnlist,Proxy" in b.surge_text
+    assert "DOMAIN-SET,http://127.0.0.1:8080/ruleset/cnlist" not in b.surge_text
+    assert b.rulesets["cnlist"] == "DOMAIN-SUFFIX,cn\nDOMAIN-WILDCARD,objectstorage.*.oraclecloud.com\n"
