@@ -1,9 +1,21 @@
 from __future__ import annotations
 
+import re
+
 import yaml
 
 from surge_gw.models import RulesetArtifact, SkippedItem
 from surge_gw.rules import convert_rule_body
+
+# Surge DOMAIN-SET / RULE-SET 均为严格校验:任一非法行会让整份资源失效。故据此校验,
+# 不可表达的条目剔除并计入 skipped,以保资源整体有效。
+# 裸域名(可选前导点 = 后缀),用于 DOMAIN-SET 行。
+_DOMAIN_SET_LINE = re.compile(r"^\.?[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$")
+# 裸域名(无前导点),用作 DOMAIN / DOMAIN-SUFFIX 的值。
+_BARE_DOMAIN = re.compile(r"^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$")
+# 通配符域名:裸域名字符集 + '*' / '?'(Surge DOMAIN-WILDCARD 的通配符)。
+# 禁止逗号/空格/控制字符 —— 逗号会破坏 RULE-SET 行的字段切分。
+_WILDCARD_DOMAIN = re.compile(r"^[A-Za-z0-9_*?-]+(?:\.[A-Za-z0-9_*?-]+)*$")
 
 
 def extract_provider_entries(raw: str, fmt: str) -> list[str]:
@@ -22,19 +34,52 @@ def extract_provider_entries(raw: str, fmt: str) -> list[str]:
     return entries
 
 
-def _domain_entry_to_set_line(entry: str) -> str:
-    """behavior=domain 条目 → Surge DOMAIN-SET 行。
-    '+.x'(后缀)→ '.x';前导点原样;其余视作精确域名原样。"""
+def _domain_entry_to_set_line(entry: str) -> str | None:
+    """behavior=domain 条目 → Surge DOMAIN-SET 行,无法表达则 None。
+    '+.x'(后缀)→ '.x';前导点/精确域名原样。含通配符 '*' 等 Surge DOMAIN-SET 不接受的形式
+    返回 None —— 否则单行非法会让 Surge 判定整份资源无效、其余域名全部失配。"""
+    line = "." + entry[2:] if entry.startswith("+.") else entry
+    return line if _DOMAIN_SET_LINE.match(line) else None
+
+
+def _has_wildcard(entry: str) -> bool:
+    return "*" in entry or "?" in entry
+
+
+def _domain_entry_to_rule_line(entry: str) -> str | None:
+    """RULE-SET 模式:单个 domain 条目 → 一行 Surge 规则体(无 policy),不可表达返回 None。
+    含通配符 → DOMAIN-WILDCARD(剥离前导 '+.' / '.';其'子域'语义被 '*' 跨段匹配覆盖);
+    '+.x' / '.x' 后缀 → DOMAIN-SUFFIX;精确域名 → DOMAIN。"""
+    if _has_wildcard(entry):
+        pattern = entry[2:] if entry.startswith("+.") else entry.lstrip(".")
+        return f"DOMAIN-WILDCARD,{pattern}" if _WILDCARD_DOMAIN.match(pattern) else None
     if entry.startswith("+."):
-        return "." + entry[2:]
-    return entry
+        body = entry[2:]
+        return f"DOMAIN-SUFFIX,{body}" if _BARE_DOMAIN.match(body) else None
+    if entry.startswith("."):
+        body = entry[1:]
+        return f"DOMAIN-SUFFIX,{body}" if _BARE_DOMAIN.match(body) else None
+    return f"DOMAIN,{entry}" if _BARE_DOMAIN.match(entry) else None
 
 
 def convert_domain_provider(entries: list[str]) -> RulesetArtifact:
-    """纯域名表 → Surge DOMAIN-SET(裸域名;前导点 = 后缀匹配)。"""
-    art = RulesetArtifact(kind="DOMAIN-SET")
+    """纯域名表 → Surge DOMAIN-SET(裸域名;前导点 = 后缀)。
+    含通配符(* / ?)的条目无法在 DOMAIN-SET 表达,则整表降级为 RULE-SET,逐条映射为
+    DOMAIN / DOMAIN-SUFFIX / DOMAIN-WILDCARD,使通配符域名仍可命中。
+    两种模式写出的每行都过严格校验,非法条目计入 skipped —— DOMAIN-SET / RULE-SET 均为
+    严格校验,单行非法会让整份资源失效。"""
+    if any(_has_wildcard(e) for e in entries):
+        art = RulesetArtifact(kind="RULE-SET")
+        to_line = _domain_entry_to_rule_line
+    else:
+        art = RulesetArtifact(kind="DOMAIN-SET")
+        to_line = _domain_entry_to_set_line
     for entry in entries:
-        art.lines.append(_domain_entry_to_set_line(entry))
+        line = to_line(entry)
+        if line is None:
+            art.skipped.append(SkippedItem("ruleset", entry, "domain entry not representable"))
+        else:
+            art.lines.append(line)
     return art
 
 
