@@ -88,12 +88,13 @@ def convert_domain_provider(entries: list[str]) -> RulesetArtifact:
 
 
 def convert_ipcidr_provider(entries: list[str]) -> RulesetArtifact:
-    """IP 段表 → Surge RULE-SET(IP-CIDR / IP-CIDR6 行)。"""
+    """IP 段表 → Surge RULE-SET(IP-CIDR / IP-CIDR6 行)。
+    每行补 no-resolve:IP 段规则只需匹配连接目标 IP,无需为域名触发 DNS 解析。"""
     art = RulesetArtifact(kind="RULE-SET")
     for entry in entries:
         cidr = entry.strip()
         rtype = "IP-CIDR6" if ":" in cidr else "IP-CIDR"
-        art.lines.append(f"{rtype},{cidr}")
+        art.lines.append(f"{rtype},{cidr},no-resolve")
     return art
 
 

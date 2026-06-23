@@ -96,7 +96,7 @@ def test_domain_provider_rule_set_maps_plus_wildcard_prefix():
 def test_ipcidr_provider_to_rule_set():
     art = convert_ipcidr_provider(["1.2.3.0/24", "2001:db8::/32"])
     assert art.kind == "RULE-SET"
-    assert art.lines == ["IP-CIDR,1.2.3.0/24", "IP-CIDR6,2001:db8::/32"]
+    assert art.lines == ["IP-CIDR,1.2.3.0/24,no-resolve", "IP-CIDR6,2001:db8::/32,no-resolve"]
 
 
 def test_classical_provider_maps_bodies():

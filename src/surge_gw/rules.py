@@ -15,6 +15,8 @@ _RENAME = {"DST-PORT": "DEST-PORT", "SRC-IP-CIDR": "SRC-IP"}
 # 规则尾部的内联选项关键字。需显式枚举,否则无法把它们与"含逗号的 policy 名"区分:
 # 二者都跟在 PAYLOAD 之后,而 Surge/mihomo 都以逗号分隔字段。
 _RULE_OPTIONS = {"no-resolve"}
+# IP 段规则补 no-resolve 的类型:这两类匹配连接目标 IP,加 no-resolve 可跳过为域名触发的 DNS 解析。
+_NO_RESOLVE_TYPES = {"IP-CIDR", "IP-CIDR6"}
 _BUILTIN_POLICIES = {"DIRECT", "REJECT", "REJECT-DROP"}
 _SKIP_TYPES = {"DOMAIN-REGEX", "PROCESS-PATH", "DSCP", "IN-PORT", "IN-TYPE", "IN-USER", "IN-NAME"}
 _LOGICAL = {"AND", "OR", "NOT"}
@@ -105,7 +107,12 @@ def _convert_one(rule: str, policy_map, ruleset_url, geosite_url) -> str | None:
             parts.append(spayload)
         if not is_subrule and mapped_policy is not None:
             parts.append(mapped_policy)
-        parts.extend(options)
+        rule_options = options
+        # IP 段规则补 no-resolve:仅顶层规则(逻辑子规则/classical provider 体走 is_subrule,
+        # 保持现状);幂等,已带的不重复。
+        if stype in _NO_RESOLVE_TYPES and not is_subrule and "no-resolve" not in options:
+            rule_options = [*options, "no-resolve"]
+        parts.extend(rule_options)
         if is_subrule:
             parts.append("__NOPOLICY__")
         return ",".join(parts)

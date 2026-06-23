@@ -77,3 +77,30 @@ def test_convert_rule_body_maps_and_rejects():
     assert convert_rule_body("DST-PORT,443") == "DEST-PORT,443"
     assert convert_rule_body("IP-CIDR,1.2.3.0/24,no-resolve") == "IP-CIDR,1.2.3.0/24,no-resolve"
     assert convert_rule_body("DOMAIN-REGEX,.*\\.cn") is None
+
+
+def test_ip_cidr_gets_no_resolve_appended():
+    # 顶层 IP 段规则未带 no-resolve → 自动补,避免为匹配 IP 规则而对域名触发 DNS 解析
+    r = conv(["IP-CIDR,1.2.3.0/24,Proxy", "IP-CIDR6,2001:db8::/32,Proxy"])
+    assert r.lines == [
+        "IP-CIDR,1.2.3.0/24,Proxy,no-resolve",
+        "IP-CIDR6,2001:db8::/32,Proxy,no-resolve",
+    ]
+
+
+def test_geoip_and_ipasn_not_auto_resolved():
+    # 只补 IP-CIDR/IP-CIDR6;GEOIP/IP-ASN 不动
+    r = conv(["GEOIP,cn,DIRECT", "IP-ASN,4538,DIRECT"])
+    assert r.lines == ["GEOIP,cn,DIRECT", "IP-ASN,4538,DIRECT"]
+
+
+def test_logical_subrule_ip_cidr_not_auto_resolved():
+    # 逻辑子规则里的 IP-CIDR(未带 no-resolve)保持现状,不补
+    r = conv(["AND,((IP-CIDR,1.2.3.0/24),(NETWORK,udp)),Proxy"])
+    assert r.lines == ["AND,((IP-CIDR,1.2.3.0/24),(PROTOCOL,UDP)),Proxy"]
+
+
+def test_convert_rule_body_ip_cidr_not_auto_resolved():
+    # classical provider 体走 convert_rule_body(is_subrule 路径),不补
+    from surge_gw.rules import convert_rule_body
+    assert convert_rule_body("IP-CIDR,1.2.3.0/24") == "IP-CIDR,1.2.3.0/24"
