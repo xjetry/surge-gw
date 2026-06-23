@@ -1,7 +1,7 @@
 services:
   surge-gw:
-    build: .
-    image: surge-gw
+    image: ghcr.io/xjetry/surge-gw:latest   # 由 .github/workflows/build-image.yml 在 CI 构建并推送;本地 docker build 被宿主 egress 代理重置 github.com 而无法完成
+    pull_policy: always                      # `docker compose up -d` 拉取刚推送的 :latest
     init: true                       # 兜底回收任何意外僵尸子进程,与 PID 1 的优雅终止互补
     restart: unless-stopped
     network_mode: host               # 与宿主回环同栈:容器绑 127.0.0.1 宿主即可直连,无需 publish

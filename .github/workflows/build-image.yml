@@ -7,8 +7,13 @@ name: Build and push image
 on:
   push:
     branches: [main]
-    tags: ['v*']
-  workflow_dispatch:
+    paths:                               # rebuild only when image inputs change — doc/spec/compose pushes are skipped
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'src/**'
+      - 'pyproject.toml'
+      - '.github/workflows/build-image.yml'
+  workflow_dispatch:                     # manual trigger for on-demand / release builds
 
 env:
   REGISTRY: ghcr.io
