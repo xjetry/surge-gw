@@ -13,7 +13,7 @@
 - 运行时仅依赖标准库 + `pyyaml>=6`；本特性不得引入任何新依赖。
 - `nudge()` 必须非阻塞：只做一次 `should_refresh` 判断 + 至多一次 `Event.set()`，**不得**在调用线程调用 `refresh_once` 或持有/等待任何会阻塞的锁。
 - `/surge` 的秒回缓存语义与响应延迟不变。
-- 后台刷新频率仍受 `min_refresh_interval`（默认 300s）debounce 约束；`/surge` 高频访问不得触发多于每 `min_refresh_interval` 一次的后台刷新。
+- 后台刷新频率仍受 `min_refresh_interval`（默认 300s）debounce 约束；`/surge` 高频访问近似每 `min_refresh_interval` 至多一次后台刷新（边界突发最坏多一次紧邻刷新，有界——同既有 `request_refresh` 的 debounce 精度）。
 - `request_refresh`（同步阻塞，`POST /refresh` 专用）行为保持不变。
 - 测试运行器：`.venv/bin/python -m pytest`。
 - 注释/docstring/commit message 只解释 WHY 与不变量，不得出现任务编号、方案代号、审阅轮次等过程性信息。

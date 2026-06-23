@@ -49,7 +49,7 @@ Surge `GET /surge` → `nudge` set wake（若 debounce 允许）→ 秒回缓存
 ## 不变量
 
 - `/surge` 响应延迟与语义不变（秒回缓存；`nudge` 不跑重操作、不阻塞调用线程）。
-- 后台刷新频率仍受 `min_refresh_interval`(300s) debounce 约束：`/surge` 高频访问**不会**触发多于每 300s 一次的后台刷新，不会打爆上游或频繁 reload mihomo。
+- 后台刷新频率仍受 `min_refresh_interval`(300s) debounce 约束：`/surge` 高频访问近似每 300s 至多一次后台刷新，不会打爆上游或频繁 reload mihomo。（边界精度同既有 `request_refresh`：因 `nudge` 不更新 `_last_started`、由 `_loop` 起跑时才更新，window 边界处的突发最坏可多出一次紧邻刷新——有界，非每访问一次。）
 - `refresh_once` 失败保留 last-good（已有机制不变）。
 - `nudge` 与 `request_refresh` 语义分离：前者非阻塞（仅唤醒），后者同步阻塞（`POST /refresh` 仍用它，不变）。
 
