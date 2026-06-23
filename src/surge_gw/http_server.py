@@ -24,6 +24,7 @@ def build_server(cache, orchestrator, config) -> ThreadingHTTPServer:
                 self._send(200, body, "application/json")
                 return
             if parsed.path == "/surge":
+                orchestrator.nudge()   # 拉配置即异步唤醒上游刷新(debounced),不阻塞秒回
                 self._send(200, cache.get().surge_text.encode())
                 return
             if parsed.path.startswith("/ruleset/"):

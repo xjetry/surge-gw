@@ -11,8 +11,11 @@ from surge_gw.refresh_policy import Snapshot
 class _FakeOrch:
     def __init__(self):
         self.refreshes = 0
+        self.nudges = 0
     def request_refresh(self):
         self.refreshes += 1
+    def nudge(self):
+        self.nudges += 1
     def health(self):
         return {"nodes": 1}
 
@@ -64,3 +67,14 @@ def test_server_binds_http_bind_not_advertise_host():
         assert srv.server_address[0] == "127.0.0.1"   # 绑定取 HTTP_BIND,而非 ADVERTISE_HOST
     finally:
         srv.server_close()
+
+
+def test_surge_nudges_and_serves_cache():
+    orch = _FakeOrch()
+    cache = Cache(Snapshot(surge_text="SURGE-BODY"))
+    srv, port = _serve(cache, orch)
+    try:
+        assert _get(port, "/surge") == (200, b"SURGE-BODY")   # 仍秒回缓存
+        assert orch.nudges == 1                               # 触发一次异步刷新唤醒
+    finally:
+        srv.shutdown()
