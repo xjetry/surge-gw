@@ -1,4 +1,8 @@
-from surge_gw.reconcile import drop_unhosted_ruleset_lines, rewrite_ruleset_types
+from surge_gw.reconcile import (
+    append_update_interval,
+    drop_unhosted_ruleset_lines,
+    rewrite_ruleset_types,
+)
 
 
 def test_rewrite_promotes_matching_urls():
@@ -18,6 +22,26 @@ def test_rewrite_promotes_matching_urls():
 def test_rewrite_noop_when_no_match():
     lines = ["RULE-SET,http://h/ruleset/cn,Proxy"]
     assert rewrite_ruleset_types(lines, set()) == lines
+
+
+def test_append_update_interval_on_hosted_rulesets_both_kinds():
+    hosted = {"http://h/ruleset/cn"}
+    lines = [
+        "RULE-SET,http://h/ruleset/cn,Proxy,no-resolve",   # 自托管 RULE-SET → 追加
+        "DOMAIN-SET,http://h/ruleset/cn,Proxy",            # 已改写为 DOMAIN-SET,同一托管 URL → 追加
+        "DOMAIN-SUFFIX,x.com,Proxy",                       # 内联规则 → 不动
+        "RULE-SET,http://other/ext,Proxy",                 # 非自托管 → 不动
+    ]
+    out = append_update_interval(lines, hosted, 1800)
+    assert out[0] == "RULE-SET,http://h/ruleset/cn,Proxy,no-resolve,update-interval=1800"
+    assert out[1] == "DOMAIN-SET,http://h/ruleset/cn,Proxy,update-interval=1800"
+    assert out[2] == "DOMAIN-SUFFIX,x.com,Proxy"
+    assert out[3] == "RULE-SET,http://other/ext,Proxy"
+
+
+def test_append_update_interval_disabled_when_non_positive():
+    lines = ["RULE-SET,http://h/ruleset/cn,Proxy"]
+    assert append_update_interval(lines, {"http://h/ruleset/cn"}, 0) == lines
 
 
 def test_drop_unhosted_ruleset_lines():

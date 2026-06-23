@@ -16,3 +16,24 @@ def test_managed_header_first_and_sections_present():
     assert "[Rule]" in text
     assert "A = socks5, 127.0.0.1, 1200, udp-relay=true" in text
     assert text.index("[Proxy]") < text.index("[Proxy Group]") < text.index("[Rule]")
+
+
+def test_always_real_ip_emitted_in_general():
+    # 域名节点的 server 进 [General] always-real-ip:fake-ip/TUN 下解析到真实 IP,
+    # 使 IP-CIDR DIRECT 旁路得以命中
+    text = build_surge_config(
+        proxy_lines=[], group_lines=[], rule_lines=["FINAL,DIRECT"],
+        managed_url="http://127.0.0.1:8080/surge", update_interval=3600,
+        always_real_ip=["a.example.com", "b.example.com"],
+    )
+    general = text.split("[General]\n", 1)[1].split("\n[Proxy]", 1)[0]
+    assert "always-real-ip = a.example.com, b.example.com" in general
+
+
+def test_always_real_ip_omitted_when_empty():
+    text = build_surge_config(
+        proxy_lines=[], group_lines=[], rule_lines=["FINAL,DIRECT"],
+        managed_url="http://127.0.0.1:8080/surge", update_interval=3600,
+        always_real_ip=[],
+    )
+    assert "always-real-ip" not in text

@@ -46,6 +46,14 @@ class Orchestrator:
         self._last_started: float | None = None
         self._wake = threading.Event()
         self._stop = threading.Event()
+        # On-demand single-ruleset rebuild reads these last-good inputs without touching _lock:
+        # the rule-provider specs (url/format/behavior) and the live mihomo SOCKS egress port.
+        self._last_rp_defs: dict = {}
+        self._last_socks_port: int | None = None
+        # Per-key single-flight: a Surge fetch storm on one ruleset must not fan out into
+        # concurrent upstream pulls; contenders fall back to cache instead of piling on.
+        self._ruleset_locks: dict[str, threading.Lock] = {}
+        self._ruleset_locks_guard = threading.Lock()
 
     def bootstrap_mihomo(self) -> None:
         """Seed a controller-enabled minimal config, start mihomo, then wait for its REST controller.
@@ -99,8 +107,11 @@ class Orchestrator:
             # Pin every node server to DIRECT so a host-side proxy capturing this gateway's
             # egress (e.g. Surge in TUN mode) cannot route a node-server connection back
             # through a node — an infinite loop.
-            bypass_rules = bypass.build_bypass_rules(
-                [defs[name].get("server") for name in pinned], self.resolve_host)
+            node_servers = [defs[name].get("server") for name in pinned]
+            bypass_rules = bypass.build_bypass_rules(node_servers, self.resolve_host)
+            # Domain node servers also go into [General] always-real-ip so a fake-ip/TUN host
+            # resolves them to real IPs, letting the IP-CIDR DIRECT bypass above actually match.
+            always_real_ip = bypass.domain_servers(node_servers)
 
             socks_port = min(alloc.mapping.values()) if alloc.mapping else None
             geosite_dat = self._load_geosite(socks_port) if upstream.get("rules") else None
@@ -111,12 +122,18 @@ class Orchestrator:
                 fetch_ruleset_content=lambda url: self._fetch_ruleset(url, socks_port),
                 geosite_dat=geosite_dat, update_interval=self.config.surge_update_interval,
                 prepend_rule_lines=bypass_rules,
+                ruleset_update_interval=self.config.ruleset_update_interval,
+                emit_domain_set=self.config.emit_domain_set,
+                always_real_ip_domains=always_real_ip,
             )
             snap = Snapshot(surge_text=bundle.surge_text, rulesets=bundle.rulesets,
                             node_port_map=alloc.mapping, skipped=bundle.skipped, dropped=alloc.dropped)
             self.cache.swap(snap)
             cachemod.persist(snap, self.config.data_dir)
             self._last_snapshot = snap
+            # Stale-free inputs for on-demand rebuilds, published only on a fully successful refresh.
+            self._last_rp_defs = upstream.get("rule-providers") or {}
+            self._last_socks_port = socks_port
             self.last_success = self.clock()
             return snap
         except Exception as exc:               # noqa: BLE001 — any failure must not corrupt last-good
@@ -143,6 +160,50 @@ class Orchestrator:
         except OSError:
             return None
 
+    def _ruleset_lock(self, key: str) -> threading.Lock:
+        with self._ruleset_locks_guard:
+            lock = self._ruleset_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._ruleset_locks[key] = lock
+            return lock
+
+    def fetch_ruleset_live(self, key: str) -> str | None:
+        """On-demand re-fetch+convert of a single upstream rule-provider for GET /ruleset/<key>.
+        Returns fresh Surge ruleset text, or None to fall back to last-good cache: out-of-scope key
+        (geosite/undefined), single-flight contention, or any fetch/convert failure. Never blocks on
+        the full-refresh lock and never raises, so a slow or dead upstream degrades to cache, not a
+        hang or a 500 back to Surge. Serves the body only; the surge_text RULE-SET/DOMAIN-SET kind is
+        left to the next full refresh, so a behavior flip self-corrects there rather than here."""
+        spec = self._last_rp_defs.get(key)
+        if spec is None:                          # geosite-* and undefined providers serve cache
+            return None
+        lock = self._ruleset_lock(key)
+        if not lock.acquire(blocking=False):      # a fetch for this key is already in flight
+            return None
+        try:
+            url = spec.get("url")
+            if not url:
+                return None
+            content = self._fetch_live(url)
+            if content is None:
+                return None
+            return assemble.rebuild_ruleset_text(content, spec, self.config.emit_domain_set)
+        except Exception:   # noqa: BLE001 — any parse/convert failure degrades to cache, never reaches Surge
+            return None
+        finally:
+            lock.release()
+
+    def _fetch_live(self, url: str) -> str | None:
+        timeout = self.config.ruleset_live_timeout
+        port = self._last_socks_port
+        try:
+            if port is not None:
+                return self.fetcher.fetch_via_socks(url, port, timeout=timeout).decode("utf-8")
+            return self.fetcher.fetch_text(url, timeout=timeout)
+        except Exception:   # noqa: BLE001 — fetch/TLS/decode failure degrades to cache
+            return None
+
     def request_refresh(self) -> None:
         """Debounce-gated synchronous refresh kick; concurrent in-flight calls are merged by refresh_once's single-flight lock."""
         now = self.clock()
@@ -152,11 +213,20 @@ class Orchestrator:
             self.refresh_once()
             self._wake.set()  # nudge the background loop to re-evaluate now rather than after the full interval
 
+    def force_refresh(self) -> None:
+        """Synchronous refresh ignoring the debounce window so GET /surge/sync returns freshly-built
+        config (not last-good). Single-flight: refresh_once takes the refresh lock non-blocking, so a
+        concurrent in-flight refresh is not stacked — the caller then serves the current cache. Runs
+        on the request thread (ThreadingHTTPServer serves each request on its own thread), so it
+        blocks only this one /surge/sync response, never the whole server."""
+        self._last_started = self.clock()
+        self.refresh_once()
+
     def nudge(self) -> None:
-        """Wake the background refresh loop (debounced) without running refresh_once on the
-        caller's thread. /surge calls this so a config pull can trigger an upstream refresh
-        while still returning cache instantly. Distinct from request_refresh, which refreshes
-        synchronously; _last_started is left for _loop to set when it actually starts the refresh."""
+        """Wake the background refresh loop (debounced) without running refresh_once on the caller's
+        thread. GET /surge calls this so Surge's frequent managed-config polls return cache instantly
+        while still triggering an upstream refresh; the fresh config lands on a later poll. Distinct
+        from force_refresh, which refreshes synchronously on the request thread."""
         if should_refresh(self.clock(), self._last_started,
                           self._lock.locked(), self.config.min_refresh_interval):
             self._wake.set()

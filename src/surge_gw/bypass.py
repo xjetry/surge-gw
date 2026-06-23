@@ -35,6 +35,27 @@ def build_bypass_rules(
     return sorted(ip_lines) + sorted(domain_lines)
 
 
+def domain_servers(servers: Iterable[str | None]) -> list[str]:
+    """Node-server hostnames as Surge [General] always-real-ip patterns: deduped, and any parent
+    domain shared by 2+ servers collapsed to *.parent (so a fake-ip/TUN setup resolves node servers
+    to their real IP, letting the IP-CIDR DIRECT bypass match — a fake 198.18.x.x would dodge it).
+    Grouping is by immediate parent (strip the leftmost label), so *.parent always matches its
+    children with a single-label *. A parent that is a bare TLD (no dot) is never wildcarded, so
+    distinct registrable domains like a.com / b.net stay separate. Sorted for byte-stable config."""
+    hosts = {s for s in servers if s and _as_ip(s) is None}
+    by_parent: dict[str, set[str]] = {}
+    for host in hosts:
+        _, _, parent = host.partition(".")
+        by_parent.setdefault(parent, set()).add(host)
+    out: set[str] = set()
+    for parent, children in by_parent.items():
+        if len(children) >= 2 and "." in parent:
+            out.add(f"*.{parent}")
+        else:
+            out.update(children)
+    return sorted(out)
+
+
 def _as_ip(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
     try:
         return ipaddress.ip_address(value)

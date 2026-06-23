@@ -54,6 +54,25 @@ def test_assemble_wires_conversion_and_promotes_domain_set():
     assert b.rulesets["geosite-cn"] == ".qq.com\n"
 
 
+def test_emit_domain_set_false_forces_rule_set_for_domain_and_geosite():
+    # DOMAIN-SET 在 Surge 无自动更新通道;emit_domain_set=False 时纯域名表也输出 RULE-SET,
+    # 使每个自托管引用都能被 Surge 按 update-interval 自动更新。
+    geo = _geo("cn", [_dom(2, "qq.com")])           # 纯域名,默认会成 DOMAIN-SET
+    def fetch_rs(url):
+        return "+.cn\nexample.cn\n"
+    b = build_config_and_rulesets(
+        upstream=UP, node_port_map={"A": 1200, "B": 1201}, provider_members={},
+        urls=URLS, host="127.0.0.1", fetch_ruleset_content=fetch_rs,
+        geosite_dat=geo, update_interval=3600, emit_domain_set=False,
+    )
+    assert "RULE-SET,http://127.0.0.1:8080/ruleset/cnlist,Proxy" in b.surge_text
+    assert "RULE-SET,http://127.0.0.1:8080/ruleset/geosite-cn,Proxy" in b.surge_text
+    assert "DOMAIN-SET," not in b.surge_text          # 不再产生无更新通道的 DOMAIN-SET 引用
+    # 托管内容也转成 RULE-SET 行格式(DOMAIN-SUFFIX / DOMAIN),与引用类型一致
+    assert b.rulesets["cnlist"] == "DOMAIN-SUFFIX,cn\nDOMAIN,example.cn\n"
+    assert b.rulesets["geosite-cn"] == "DOMAIN-SUFFIX,qq.com\n"
+
+
 def test_prepend_rule_lines_land_at_top_of_rule_section():
     # bypass(节点服务器 DIRECT)规则必须早于 GEOIP/FINAL,故拼在 [Rule] 段最前
     b = build_config_and_rulesets(

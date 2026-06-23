@@ -9,15 +9,23 @@ from surge_gw.refresh_policy import Snapshot
 
 
 class _FakeOrch:
-    def __init__(self):
+    def __init__(self, live=None):
         self.refreshes = 0
+        self.force_refreshes = 0
         self.nudges = 0
+        self.live = live            # fetch_ruleset_live 返回值;None = 回退缓存
+        self.live_keys = []
     def request_refresh(self):
         self.refreshes += 1
+    def force_refresh(self):
+        self.force_refreshes += 1
     def nudge(self):
         self.nudges += 1
     def health(self):
         return {"nodes": 1}
+    def fetch_ruleset_live(self, key):
+        self.live_keys.append(key)
+        return self.live
 
 
 def _serve(cache, orch):
@@ -69,12 +77,55 @@ def test_server_binds_http_bind_not_advertise_host():
         srv.server_close()
 
 
-def test_surge_nudges_and_serves_cache():
+def test_ruleset_get_serves_live_when_available():
+    orch = _FakeOrch(live="LIVE.cn\n")
+    cache = Cache(Snapshot(surge_text="x", rulesets={"cnlist": ".cn\n"}))
+    srv, port = _serve(cache, orch)
+    try:
+        assert _get(port, "/ruleset/cnlist") == (200, b"LIVE.cn\n")  # 同步按需拉取的最新内容优先于缓存
+        assert orch.live_keys == ["cnlist"]
+    finally:
+        srv.shutdown()
+
+
+def test_ruleset_get_falls_back_to_cache_when_live_none():
+    orch = _FakeOrch(live=None)
+    cache = Cache(Snapshot(surge_text="x", rulesets={"cnlist": ".cn\n"}))
+    srv, port = _serve(cache, orch)
+    try:
+        assert _get(port, "/ruleset/cnlist") == (200, b".cn\n")      # live 不可用 → last-good 缓存
+    finally:
+        srv.shutdown()
+
+
+def test_ruleset_get_404_when_neither_live_nor_cache():
+    orch = _FakeOrch(live=None)
+    srv, port = _serve(Cache(Snapshot(surge_text="x")), orch)
+    try:
+        assert _get(port, "/ruleset/missing")[0] == 404
+    finally:
+        srv.shutdown()
+
+
+def test_surge_serves_cache_and_nudges():
     orch = _FakeOrch()
     cache = Cache(Snapshot(surge_text="SURGE-BODY"))
     srv, port = _serve(cache, orch)
     try:
-        assert _get(port, "/surge") == (200, b"SURGE-BODY")   # 仍秒回缓存
-        assert orch.nudges == 1                               # 触发一次异步刷新唤醒
+        assert _get(port, "/surge") == (200, b"SURGE-BODY")   # 秒回缓存快照
+        assert orch.nudges == 1                               # 异步唤醒一次刷新
+        assert orch.force_refreshes == 0                      # 不在请求线程同步刷新
+    finally:
+        srv.shutdown()
+
+
+def test_surge_sync_force_refreshes_then_serves():
+    orch = _FakeOrch()
+    cache = Cache(Snapshot(surge_text="SURGE-BODY"))
+    srv, port = _serve(cache, orch)
+    try:
+        assert _get(port, "/surge/sync") == (200, b"SURGE-BODY")  # 同步刷新后返回最新构建
+        assert orch.force_refreshes == 1                          # 每次访问都强制刷新一次
+        assert orch.nudges == 0
     finally:
         srv.shutdown()

@@ -24,12 +24,24 @@ def build_server(cache, orchestrator, config) -> ThreadingHTTPServer:
                 self._send(200, body, "application/json")
                 return
             if parsed.path == "/surge":
-                orchestrator.nudge()   # 拉配置即异步唤醒上游刷新(debounced),不阻塞秒回
+                # Surge 自动轮询的 MANAGED-CONFIG 地址:秒回缓存快照 + 异步唤醒一次刷新(防抖),
+                # 不阻塞,新配置随下次轮询落地。
+                orchestrator.nudge()
+                self._send(200, cache.get().surge_text.encode())
+                return
+            if parsed.path == "/surge/sync":
+                # 手动即时刷新:同步跑完一次刷新再回最新构建(单飞:在途刷新不叠加,此时回当前缓存)。
+                # 仅阻塞本请求线程,不阻塞 server。响应时长 = 一次完整刷新。
+                orchestrator.force_refresh()
                 self._send(200, cache.get().surge_text.encode())
                 return
             if parsed.path.startswith("/ruleset/"):
                 key = unquote(parsed.path[len("/ruleset/"):])
-                text = cache.get().rulesets.get(key)
+                # Synchronous on-demand re-fetch of the upstream rule-provider; None (out-of-scope,
+                # contention, or failure) degrades to last-good cache so Surge never hangs or 404s.
+                text = orchestrator.fetch_ruleset_live(key)
+                if text is None:
+                    text = cache.get().rulesets.get(key)
                 if text is None:
                     self._send(404, b"not found\n")
                     return

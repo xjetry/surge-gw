@@ -155,16 +155,44 @@ def test_refresh_emits_server_bypass_rules_at_top(tmp_path):
     assert rule_body.startswith("IP-CIDR,203.0.113.7/32,DIRECT,no-resolve\n")
 
 
+DOMAIN_NODE_SUB = yaml.safe_dump({
+    "proxies": [{"name": "A", "type": "ss", "server": "node.example.com", "port": 8388}],
+    "rules": ["MATCH,DIRECT"],
+})
+
+
+def test_refresh_adds_domain_node_servers_to_always_real_ip(tmp_path):
+    # 域名节点的 server 须进 [General] always-real-ip,fake-ip/TUN 下才解析到真实 IP
+    cfg = _cfg(tmp_path)
+    urls = RulesetUrls(host=cfg.advertise_host, port=cfg.http_port)
+    o = Orchestrator(config=cfg, fetcher=FakeFetcher(DOMAIN_NODE_SUB), manager=FakeManager(),
+                     cache=Cache(Snapshot(surge_text="placeholder")),
+                     urls=urls, secret="s", geosite_source=None, resolve_host=lambda h: ["1.2.3.4"])
+    snap = o.refresh_once()
+    assert snap is not None
+    general = snap.surge_text.split("[General]\n", 1)[1].split("\n[Proxy]", 1)[0]
+    assert "always-real-ip = node.example.com" in general
+
+
 def test_refresh_once_builds_and_swaps_cache(tmp_path):
     o = _orch(tmp_path, FakeFetcher(SUB))
     snap = o.refresh_once()
     assert snap is not None
     assert "A = socks5, 127.0.0.1, 1200, udp-relay=true" in snap.surge_text
     assert snap.node_port_map == {"A": 1200}
-    assert snap.rulesets["cnlist"] == ".cn\n"
+    assert snap.rulesets["cnlist"] == "DOMAIN-SUFFIX,cn\n"    # 默认输出 RULE-SET 行格式(可远程自动更新)
     assert o.cache.get().surge_text == snap.surge_text       # 换了缓存
     assert (tmp_path / "cache" / "surge.conf").exists()      # 持久化 last-good
     assert o.health()["last_success"] is not None
+
+
+def test_refresh_emits_update_interval_on_hosted_ruleset(tmp_path):
+    # 自托管 ruleset 行须为带 update-interval 的 RULE-SET,Surge 才会按该间隔回拉 → 触发按需重抓
+    o = _orch(tmp_path, FakeFetcher(SUB))
+    snap = o.refresh_once()
+    assert snap is not None
+    assert ("RULE-SET,http://127.0.0.1:8080/ruleset/cnlist,Proxy,update-interval=86400"
+            in snap.surge_text)
 
 
 def test_refresh_rebootstraps_when_mihomo_dead(tmp_path):
@@ -275,16 +303,44 @@ def test_no_nodes_fetches_rulesets_directly(tmp_path):
     snap = o.refresh_once()
     assert snap is not None
     assert snap.node_port_map == {}            # 无可钉定节点
-    assert snap.rulesets["cnlist"] == ".cn\n"  # ruleset 经直连(fetch_text)托管;"+." 前缀被规范化为前导点
+    assert snap.rulesets["cnlist"] == "DOMAIN-SUFFIX,cn\n"  # 经直连(fetch_text)托管;"+." 后缀输出为 RULE-SET 行
     assert fetcher.socks_calls == 0            # 无 socks 端口 → 未走 socks 路径
 
 
-def test_nudge_sets_wake_on_first_call(tmp_path):
+def test_force_refresh_runs_in_caller_thread(tmp_path):
+    o = _orch(tmp_path, FakeFetcher(SUB))
+    o.force_refresh()
+    assert o.last_success is not None                    # 在调用线程同步跑完 refresh_once
+    assert o.cache.get().node_port_map == {"A": 1200}    # 缓存已换成最新构建结果
+
+
+def test_force_refresh_ignores_debounce(tmp_path):
+    ticks = [1000.0]
+    o = _orch(tmp_path, FakeFetcher(SUB))
+    o.clock = lambda: ticks[0]
+    o.force_refresh()
+    assert o.last_success == 1000.0
+    ticks[0] = 1100.0                # 距上次仅 100s < 300:request_refresh 会被防抖挡掉
+    o.force_refresh()
+    assert o.last_success == 1100.0  # force_refresh 无视防抖,每次都真刷新
+
+
+def test_force_refresh_single_flight_when_in_flight(tmp_path):
+    o = _orch(tmp_path, FakeFetcher(SUB))
+    o._lock.acquire()                # 模拟刷新在途
+    try:
+        o.force_refresh()            # 非阻塞拿锁失败 → 不叠加
+        assert o.last_success is None
+    finally:
+        o._lock.release()
+
+
+def test_nudge_sets_wake_without_refreshing_in_caller_thread(tmp_path):
     o = _orch(tmp_path, FakeFetcher(SUB))
     o.nudge()
     assert o._wake.is_set()                              # 唤醒后台 _loop
     assert o.cache.get().surge_text == "placeholder"     # 未在调用线程跑 refresh_once
-    assert o.last_success is None                        # refresh 从未执行
+    assert o.last_success is None
 
 
 def test_nudge_debounced_within_min_interval(tmp_path):
@@ -297,16 +353,6 @@ def test_nudge_debounced_within_min_interval(tmp_path):
     assert not o._wake.is_set()      # 防抖窗口内不唤醒,避免高频 /surge 打爆上游
 
 
-def test_nudge_wakes_after_min_interval(tmp_path):
-    ticks = [1000.0]
-    o = _orch(tmp_path, FakeFetcher(SUB))
-    o.clock = lambda: ticks[0]
-    o._last_started = 1000.0
-    ticks[0] = 1400.0                # 距上次起跑 400s >= 300
-    o.nudge()
-    assert o._wake.is_set()
-
-
 def test_nudge_skips_when_in_flight(tmp_path):
     o = _orch(tmp_path, FakeFetcher(SUB))
     o._lock.acquire()                # 模拟刷新在途
@@ -315,3 +361,64 @@ def test_nudge_skips_when_in_flight(tmp_path):
         assert not o._wake.is_set()  # 在途时不唤醒,不叠加重操作
     finally:
         o._lock.release()
+
+
+class LiveFetcher(FakeFetcher):
+    """记录 socks 拉取的 URL,并允许在两次刷新之间改 body,以区分整体刷新与按需重拉。"""
+    def __init__(self, sub, body=b"+.cn\n"):
+        super().__init__(sub)
+        self.body = body
+        self.socks_urls: list[str] = []
+    def fetch_via_socks(self, url, socks_port, *, timeout=30.0):
+        self.socks_urls.append(url)
+        return self.body
+
+
+def test_fetch_ruleset_live_refetches_and_converts(tmp_path):
+    f = LiveFetcher(SUB)
+    o = _orch(tmp_path, f)
+    assert o.refresh_once() is not None
+    assert o.cache.get().rulesets["cnlist"] == "DOMAIN-SUFFIX,cn\n"   # 整体刷新时托管的旧内容(RULE-SET 行)
+    f.body = b"+.example\n"                                # 上游已更新
+    text = o.fetch_ruleset_live("cnlist")
+    assert text == "DOMAIN-SUFFIX,example\n"              # 重新拉取+转换的最新内容,与引用一致地输出 RULE-SET 行
+    assert f.socks_urls[-1] == "http://h/cn.txt"          # 拉的是该 provider 的上游 URL
+
+
+def test_fetch_ruleset_live_unknown_key_returns_none(tmp_path):
+    o = _orch(tmp_path, LiveFetcher(SUB))
+    assert o.refresh_once() is not None
+    assert o.fetch_ruleset_live("nope") is None           # 上游未定义 → 回退缓存
+
+
+def test_fetch_ruleset_live_geosite_key_returns_none(tmp_path):
+    o = _orch(tmp_path, LiveFetcher(SUB))
+    assert o.refresh_once() is not None
+    assert o.fetch_ruleset_live("geosite-google") is None  # 范围限定上游 rule-provider,geosite 回退缓存
+
+
+def test_fetch_ruleset_live_falls_back_on_fetch_failure(tmp_path):
+    o = _orch(tmp_path, FakeFetcher(SUB, socks_error=OSError("upstream down")))
+    assert o.refresh_once() is not None
+    assert o.fetch_ruleset_live("cnlist") is None         # 拉取失败 → None(handler 回退缓存),不抛给 Surge
+
+
+def test_fetch_ruleset_live_mrs_returns_none(tmp_path):
+    sub = yaml.safe_dump({
+        "proxies": [{"name": "A"}],
+        "rules": ["RULE-SET,blob,Proxy", "MATCH,Proxy"],
+        "rule-providers": {"blob": {"behavior": "domain", "format": "mrs", "url": "http://h/b.mrs"}},
+    })
+    o = _orch(tmp_path, LiveFetcher(sub))
+    assert o.refresh_once() is not None
+    assert o.fetch_ruleset_live("blob") is None           # mrs 二进制无法转换 → None
+
+
+def test_fetch_ruleset_live_single_flight_on_contention(tmp_path):
+    o = _orch(tmp_path, LiveFetcher(SUB))
+    assert o.refresh_once() is not None
+    o._ruleset_lock("cnlist").acquire()                   # 模拟该 key 的拉取在途
+    try:
+        assert o.fetch_ruleset_live("cnlist") is None     # 不与在途拉取叠加 → 回退缓存
+    finally:
+        o._ruleset_lock("cnlist").release()

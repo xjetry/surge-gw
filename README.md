@@ -23,7 +23,7 @@ Surge 原生不支持 mihomo 的 `proxy-providers`、`rule-providers`、`geosite
 GET /surge  ──秒回缓存──►  Surge
 ```
 
-刷新流水线（抓上游 + 两次 mihomo reload + 抓所有 ruleset + geosite）是一次重操作，因此 `/surge` **一律秒回缓存、对 Surge 异步**，不在请求线程里跑刷新。
+刷新流水线（抓上游 + 两次 mihomo reload + 抓所有 ruleset + geosite）是一次重操作，因此 `GET /surge`（Surge 自动轮询的地址）**一律秒回缓存、对 Surge 异步**，不在请求线程里跑刷新。需要即时拿到最新配置时用 `GET /surge/sync`（同步跑完一次刷新再返回，响应时长 = 一次完整刷新）。
 
 ## 快速开始
 
@@ -61,8 +61,11 @@ curl -s 127.0.0.1:8080/health
 | `PORT_BASE` | `1200` | 本地 SOCKS 节点监听端口的起始值 |
 | `MAX_NODES` | `100` | 钉定节点数上限 |
 | `REFRESH_INTERVAL` | `21600` | 后台自动刷新间隔（秒，默认 6h） |
-| `MIN_REFRESH_INTERVAL` | `300` | 刷新防抖窗口（秒）；`/surge` nudge 与 `POST /refresh` 共用 |
+| `MIN_REFRESH_INTERVAL` | `300` | 刷新防抖窗口（秒）；`GET /surge` 的异步 nudge、`POST /refresh` 与后台循环共用（`GET /surge/sync` 为强制刷新，不受此防抖约束） |
 | `SURGE_UPDATE_INTERVAL` | `3600` | 写进 `#!MANAGED-CONFIG` 的 `interval`（秒） |
+| `RULESET_UPDATE_INTERVAL` | `86400` | 写进自托管 ruleset 行的 `update-interval`（秒）；决定 Surge 多久回拉一次 `/ruleset`（即多久触发一次按需重抓）。默认与 Surge 外部资源默认一致，调小提高新鲜度 |
+| `RULESET_LIVE_TIMEOUT` | `6` | `GET /ruleset/<key>` 按需重拉上游 rule-provider 的超时（秒）；超时即回退缓存 |
+| `EMIT_DOMAIN_SET` | `false` | 自托管规则集是否输出 `DOMAIN-SET`。Surge 的 `DOMAIN-SET` 无「自动更新间隔」更新通道，故默认 `false`：纯域名表也输出 `RULE-SET`（带 `update-interval`、可远程自动更新）。仅在你确实需要 `DOMAIN-SET` 时设 `true` |
 | `GEOSITE_URL` | （空） | `geosite.dat` 下载 URL，留空则跳过 geosite |
 | `GEOSITE_TTL` | `86400` | geosite 缓存 TTL（秒） |
 | `MIHOMO_BIN` | `mihomo` | mihomo 可执行文件路径 |
@@ -72,26 +75,41 @@ curl -s 127.0.0.1:8080/health
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `GET` | `/surge` | 返回 Surge 托管配置（秒回缓存）。访问会**异步**唤醒一次后台上游刷新（带防抖），不阻塞响应。 |
-| `GET` | `/ruleset/<key>` | 返回自托管的某个 ruleset 内容；不存在返回 404。 |
+| `GET` | `/surge` | 返回 Surge 托管配置（秒回缓存）。访问会**异步**唤醒一次后台上游刷新（带防抖），不阻塞响应。Surge 的 MANAGED-CONFIG 指向此地址。 |
+| `GET` | `/surge/sync` | **同步强制刷新**后返回最新构建的配置（忽略防抖；单飞：在途刷新不叠加，此时回当前缓存）。响应时长 = 一次完整刷新，供手动/浏览器即时取新。 |
+| `GET` | `/ruleset/<key>` | 返回自托管的某个 ruleset 内容。命中上游 rule-provider 时**同步**重拉该 provider、转换后返回最新内容（超时 `RULESET_LIVE_TIMEOUT`）；超时/失败/单飞冲突，或 geosite 等范围外 key，回退 last-good 缓存；二者皆无返回 404。 |
 | `GET` | `/health` | JSON：`nodes` / `dropped` / `skipped` / `last_success` / `last_error`。 |
 | `POST` | `/refresh` | 同步触发一次刷新（防抖），返回 `202`。 |
 
 ### 刷新触发
 
-上游重抓由四种方式触发，均受 `MIN_REFRESH_INTERVAL` 防抖：
+上游重抓由五种方式触发：
 
-- 后台每 `REFRESH_INTERVAL` 一次；
-- `POST /refresh`（同步阻塞）；
-- **`GET /surge` 访问**（非阻塞 nudge：仅唤醒后台刷新线程，不在请求线程跑刷新，秒回不变）；
+- **`GET /surge/sync`**：同步强制刷新，**忽略**防抖、每次都真刷新（单飞防并发叠加），返回最新配置；
+- **`GET /surge` 访问**（异步 nudge：仅唤醒后台刷新线程，不在请求线程跑刷新，秒回不变，受防抖）；
+- 后台每 `REFRESH_INTERVAL` 一次（受 `MIN_REFRESH_INTERVAL` 防抖）；
+- `POST /refresh`（同步阻塞，受防抖）；
 - 重启时冷启动刷新。
 
-> 想让「Surge 拉配置」本身成为刷新的唯一驱动、便于观察 nudge 效果，可把 `REFRESH_INTERVAL` 调大（如 `21600`），这样只有 `/surge` 访问会推动刷新（仍每 `MIN_REFRESH_INTERVAL` 至多一次）。
+> Surge 自动轮询 `/surge` 秒回、异步带动刷新，新配置随下次轮询落地；想立刻拿到最新配置（如手动更新）用 `/surge/sync`。
+
+### 单个 ruleset 按需更新
+
+整次刷新是「全量重建」；若只想更新某一个上游 `rule-provider`，无需触发全量刷新：
+
+- `GET /ruleset/<key>` 命中上游 `rule-provider` 时，**同步**重拉该 provider（经活节点出口或直连）、转换为 Surge 格式后返回最新内容，超时上限 `RULESET_LIVE_TIMEOUT`。
+- 超时 / 拉取失败 / 同一 key 正在拉取（per-key 单飞）/ geosite 等范围外 key → **回退 last-good 缓存**，绝不让 Surge 卡死或拿 404。
+- 同步路径与全量刷新共用同一套转换（含 `EMIT_DOMAIN_SET` 策略），所以返回正文与引用类型始终一致，不会出现「`RULE-SET` 引用却返回 `DOMAIN-SET` 正文」的解析错配。
+
+谁来触发这次按需重抓？Surge 自己——它按自托管 ruleset 行上的 `update-interval`（由 `RULESET_UPDATE_INTERVAL` 写入）回拉 `/ruleset/<key>`，每次回拉即触发一次上游重抓。Surge 外部资源**默认 24h** 才回拉一次；要更勤就调小 `RULESET_UPDATE_INTERVAL`。也可手动 `curl 127.0.0.1:8080/ruleset/<key>` 立即重抓一次。
+
+> **为何默认不用 `DOMAIN-SET`**：Surge 里 `RULE-SET`（外部规则集）有「自动更新间隔」更新通道，`DOMAIN-SET`（域名集）即便引用 URL 也没有该通道、不会自动更新。为「所有外部资源都可更新」，本网关默认把纯域名表也输出为 `RULE-SET`（`DOMAIN-SUFFIX` / `DOMAIN` 行，与 `DOMAIN-SET` 等价、无信息损失，新版 Surge 二者性能无差异）。
 
 ## 网络说明
 
 - 容器仅绑回环、走 host 网络，不 publish 端口，不向局域网暴露；所有端点无鉴权（依赖回环隔离）。
 - 节点服务器地址会以 `DIRECT` 置顶到 `[Rule]`，避免宿主侧代理（如 Surge TUN 模式）重新捕获本网关出向流量、把节点连接绕回节点造成的死循环。
+- 域名型节点服务器会写进 `[General] always-real-ip`，让 fake-ip/TUN 下这些域名解析到真实 IP，使上面的 IP-CIDR DIRECT 旁路得以命中（fake `198.18.x.x` 否则会绕过）。同一父域名下的多个子域名折叠为 `*.父域名`。
 
 ## 本地开发
 
@@ -100,7 +118,7 @@ curl -s 127.0.0.1:8080/health
 ```bash
 python -m venv .venv
 .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest -q          # 133 passed
+.venv/bin/python -m pytest -q          # 149 passed
 ```
 
 直接在宿主跑（非容器）：
@@ -132,7 +150,7 @@ docker compose up -d   # 拉取新 :latest 并重建容器
 src/surge_gw/
   __main__.py        # 入口:装配 + bootstrap mihomo + 后台刷新 + HTTP server
   orchestrator.py    # 刷新流水线(single-flight + 原子 swap + 失败保留 last-good)
-  http_server.py     # /surge /ruleset /health /refresh
+  http_server.py     # /surge /surge/sync /ruleset /health /refresh
   mihomo_config.py   # 生成 mihomo 运行时配置(empty-listener / pinned 两阶段)
   mihomo_manager.py  # mihomo 子进程生命周期 + REST 控制器 reload
   assemble.py        # 组装 Surge 配置 + ruleset 集合

@@ -17,6 +17,9 @@ class Config:
     geosite_ttl: int
     geosite_url: str | None
     surge_update_interval: int
+    ruleset_update_interval: int
+    ruleset_live_timeout: int
+    emit_domain_set: bool
     mihomo_bin: str
     data_dir: str
 
@@ -24,6 +27,13 @@ class Config:
 def _int(env: Mapping[str, str], key: str, default: int) -> int:
     raw = env.get(key)
     return int(raw) if raw not in (None, "") else default
+
+
+def _bool(env: Mapping[str, str], key: str, default: bool) -> bool:
+    raw = env.get(key)
+    if raw in (None, ""):
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
 def from_env(env: Mapping[str, str]) -> Config:
@@ -43,6 +53,9 @@ def from_env(env: Mapping[str, str]) -> Config:
         geosite_ttl=_int(env, "GEOSITE_TTL", 86400),
         geosite_url=env.get("GEOSITE_URL") or None,
         surge_update_interval=_int(env, "SURGE_UPDATE_INTERVAL", 3600),
+        ruleset_update_interval=_int(env, "RULESET_UPDATE_INTERVAL", 86400),
+        ruleset_live_timeout=_int(env, "RULESET_LIVE_TIMEOUT", 6),
+        emit_domain_set=_bool(env, "EMIT_DOMAIN_SET", False),
         mihomo_bin=env.get("MIHOMO_BIN") or "mihomo",
         data_dir=env.get("DATA_DIR") or "./data",
     )
