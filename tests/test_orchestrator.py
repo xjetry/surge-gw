@@ -277,3 +277,41 @@ def test_no_nodes_fetches_rulesets_directly(tmp_path):
     assert snap.node_port_map == {}            # 无可钉定节点
     assert snap.rulesets["cnlist"] == ".cn\n"  # ruleset 经直连(fetch_text)托管;"+." 前缀被规范化为前导点
     assert fetcher.socks_calls == 0            # 无 socks 端口 → 未走 socks 路径
+
+
+def test_nudge_sets_wake_on_first_call(tmp_path):
+    o = _orch(tmp_path, FakeFetcher(SUB))
+    o.nudge()
+    assert o._wake.is_set()                              # 唤醒后台 _loop
+    assert o.cache.get().surge_text == "placeholder"     # 未在调用线程跑 refresh_once
+    assert o.last_success is None                        # refresh 从未执行
+
+
+def test_nudge_debounced_within_min_interval(tmp_path):
+    ticks = [1000.0]
+    o = _orch(tmp_path, FakeFetcher(SUB))
+    o.clock = lambda: ticks[0]
+    o._last_started = 1000.0
+    ticks[0] = 1100.0                # 距上次起跑 100s < 300 防抖窗口
+    o.nudge()
+    assert not o._wake.is_set()      # 防抖窗口内不唤醒,避免高频 /surge 打爆上游
+
+
+def test_nudge_wakes_after_min_interval(tmp_path):
+    ticks = [1000.0]
+    o = _orch(tmp_path, FakeFetcher(SUB))
+    o.clock = lambda: ticks[0]
+    o._last_started = 1000.0
+    ticks[0] = 1400.0                # 距上次起跑 400s >= 300
+    o.nudge()
+    assert o._wake.is_set()
+
+
+def test_nudge_skips_when_in_flight(tmp_path):
+    o = _orch(tmp_path, FakeFetcher(SUB))
+    o._lock.acquire()                # 模拟刷新在途
+    try:
+        o.nudge()
+        assert not o._wake.is_set()  # 在途时不唤醒,不叠加重操作
+    finally:
+        o._lock.release()

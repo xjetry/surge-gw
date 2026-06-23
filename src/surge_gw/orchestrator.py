@@ -152,6 +152,15 @@ class Orchestrator:
             self.refresh_once()
             self._wake.set()  # nudge the background loop to re-evaluate now rather than after the full interval
 
+    def nudge(self) -> None:
+        """Wake the background refresh loop (debounced) without running refresh_once on the
+        caller's thread. /surge calls this so a config pull can trigger an upstream refresh
+        while still returning cache instantly. Distinct from request_refresh, which refreshes
+        synchronously; _last_started is left for _loop to set when it actually starts the refresh."""
+        if should_refresh(self.clock(), self._last_started,
+                          self._lock.locked(), self.config.min_refresh_interval):
+            self._wake.set()
+
     def start_background(self) -> None:
         threading.Thread(target=self._loop, daemon=True).start()
 
