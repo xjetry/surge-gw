@@ -5,12 +5,13 @@ services:
     init: true                       # 兜底回收任何意外僵尸子进程,与 PID 1 的优雅终止互补
     restart: unless-stopped
     network_mode: host               # 与宿主回环同栈:容器绑 127.0.0.1 宿主即可直连,无需 publish
-    environment:
+    env_file:
+      - .env                         # .env 为所有可调项的单一来源(HTTP_PORT / REFRESH_INTERVAL / MAX_NODES / GEOSITE_URL ...)
+    environment:                     # 覆盖 env_file:锁死回环安全项,不让 .env 误改而向局域网暴露
       SUBSCRIPTION_URL: ${SUBSCRIPTION_URL:?set SUBSCRIPTION_URL in .env}
-      HTTP_BIND: 127.0.0.1          # 仅绑回环;host 网络下宿主 Surge 经 127.0.0.1 直连,不向局域网暴露
+      HTTP_BIND: 127.0.0.1          # 仅绑回环;host 网络下宿主 Surge 经 127.0.0.1 直连
       ADVERTISE_HOST: 127.0.0.1     # 写进 Surge 配置、供宿主机回连的 host
       DATA_DIR: /data
-      # 可选覆盖:MAX_NODES / GEOSITE_URL / REFRESH_INTERVAL ...
     volumes:
       - surge-gw-data:/data          # 命名 volume:让非 root 用户(uid 10001)可写、缓存重启持久
 

@@ -32,5 +32,5 @@ ENV DATA_DIR=/data \
     MIHOMO_BIN=/usr/local/bin/mihomo
 VOLUME ["/data"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
-  CMD ["python", "-c", "import json,urllib.request,sys; d=json.load(urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=4)); sys.exit(0 if d.get('nodes', 0) > 0 else 1)"]
+  CMD ["python", "-c", "import json,os,urllib.request,sys; p=os.environ.get('HTTP_PORT','8080'); d=json.load(urllib.request.urlopen(f'http://127.0.0.1:{p}/health', timeout=4)); sys.exit(0 if d.get('nodes', 0) > 0 else 1)"]
 ENTRYPOINT ["python", "-m", "surge_gw"]
